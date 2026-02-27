@@ -1,6 +1,6 @@
 # DIY Star Wars GPT
 
-A personal project to train a 10M-parameter Transformer model from scratch on the Star Wars saga. This project utilizes the **novelizations** of the movies rather than raw screenplays to provide a richer, more descriptive linguistic dataset.
+A personal project to train a 10M-parameter Transformer model from scratch on the Star Wars saga. This project utilizes the **novelizations** of the movies rather than raw screenplays to provide a richer, more descriptive linguistic dataset. Cumulative text data used to train WangGPT is about 805,904 tokens, with a vocabulary size of about 37,159 words.
 
 ## Project Goal
 Compare the loss curves of three model variants (Random Baseline, No Positional Encoding, and Full Transformer) while strictly adhering to a 10,000,000 parameter limit via a dynamic quadratic solver.

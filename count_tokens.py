@@ -66,4 +66,6 @@ def main():
 
 
 if __name__ == "__main__":
-    main()
+    print("COMBINED TEXT TOTAL \# of TOKENS =",
+          count_tokens_in_file("data/combined_star_wars.txt"))
+    # main()
