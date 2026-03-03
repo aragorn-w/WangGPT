@@ -8,7 +8,7 @@ implemented from scratch in PyTorch. This project explores the architecture of m
 This project uses [uv](https://docs.astral.sh/uv/) for robust dependency management.
 
 ### 0. Download the Data
-Star Wars novelization data files are [hosted here on my Google Drive](https://drive.google.com/file/d/1G6x5uiZbvacg6NP9vq5xVFeIJnAjUdtf/view?usp=share_link).
+Star Wars novelization data files are [hosted here on my Google Drive](https://drive.google.com/file/d/1y1fF0ZwVFuTmOiQM8XHDNkcBIaDDbym5/view?usp=share_link).
 
 **Reproduction**: Simply move the `data.zip` file into the project root. The training script will automatically unzip and process it for you.
 
