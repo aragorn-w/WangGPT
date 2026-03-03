@@ -8,7 +8,9 @@ implemented from scratch in PyTorch. This project explores the architecture of m
 This project uses [uv](https://docs.astral.sh/uv/) for robust dependency management.
 
 ### 0. Download the Data
-**All Star Wars novelization text data** is contained within the .zip file [hosted here on my Google Drive](https://drive.google.com/file/d/1y1fF0ZwVFuTmOiQM8XHDNkcBIaDDbym5/view?usp=share_link). Download the .zip file and move it (DO NOT UNZIP IT, that is done for you automatically) to the project root.
+Star Wars novelization data files are [hosted here on my Google Drive](https://drive.google.com/file/d/1G6x5uiZbvacg6NP9vq5xVFeIJnAjUdtf/view?usp=share_link).
+
+**Reproduction**: Simply move the `data.zip` file into the project root. The training script will automatically unzip and process it for you.
 
 ### 1. Install Dependencies
 ```bash
@@ -55,9 +57,9 @@ Loss curves comparing the Random Baseline vs. No-PE (Best) vs. With-PE (Partial)
 
 | Model | Status | Final Loss |
 | :--- | :--- | :--- |
-| **Random Init** | Completed | 10.5 |
-| **No-PE** | Completed (Best of Grid Search) | 6.8 |
-| **With-PE** | In-Progress (Partial @ 20k iters) | 7.5 |
+| **Random Init** | Completed | 10.58 |
+| **No-PE** | Completed | 7.12 |
+| **With-PE** | Completed | 7.09 |
 
 ### Example Generations
 

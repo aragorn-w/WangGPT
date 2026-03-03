@@ -7,12 +7,17 @@ import torch
 from rich import print as rprint
 from rich.console import Console
 from rich.panel import Panel
-from rich.prompt import Prompt, IntPrompt
+from rich.prompt import IntPrompt, Prompt
 from rich.table import Table
 
-from utils import clean_tokenization, translate_state_dict,\
-    TOK_TO_IDX, IDX_TO_TOK, VOCAB_SIZE
-from wang_gpt import WangGPT, Config
+from utils import (
+    IDX_TO_TOK,
+    TOK_TO_IDX,
+    VOCAB_SIZE,
+    clean_tokenization,
+    translate_state_dict,
+)
+from wang_gpt import Config, WangGPT
 
 CONSOLE = Console()
 
@@ -44,14 +49,17 @@ def load_checkpoint(model_path: str) -> tuple[WangGPT, Config, str]:
         config: Config = Config(
             d_vocab=VOCAB_SIZE,
             d_model=config_dict["d_m"],
-            n_layers=config_dict["layers"],
+            n_layers=config_dict.get("layers", 7),
             n_heads=4,
-            window_size=config_dict["window_size"]
+            window_size=config_dict["window_size"],
+            use_pos_emb=config_dict.get("use_pe", True),
         )
     else:
         # Try to reconstruct from filename and old format data
-        rprint("[yellow]⚠️  Ancient Holocron detected (Legacy format). "
-               "Deciphering...[/yellow]")
+        rprint(
+            "[yellow]⚠️  Ancient Holocron detected (Legacy format). "
+            "Deciphering...[/yellow]"
+        )
         state_dict_raw: dict[str, torch.Tensor] = checkpoint
 
         # Parse filename for dm and batch_size
@@ -60,11 +68,7 @@ def load_checkpoint(model_path: str) -> tuple[WangGPT, Config, str]:
         d_m: int = int(dm_match.group(1)) if dm_match else 120
 
         config = Config(
-            d_vocab=VOCAB_SIZE,
-            d_model=d_m,
-            n_layers=7,
-            n_heads=4,
-            window_size=128
+            d_vocab=VOCAB_SIZE, d_model=d_m, n_layers=7, n_heads=4, window_size=128
         )
 
         # Translate the legacy state dict
@@ -95,9 +99,15 @@ def load_checkpoint(model_path: str) -> tuple[WangGPT, Config, str]:
     return model, config, device
 
 
-def generate_response(model: WangGPT, device: str, prompt_text: str,
-                      max_new_tokens: int = 30, temperature: float = 0.7,
-                      top_k: int = 50, top_p: float = 0.9) -> str:
+def generate_response(
+    model: WangGPT,
+    device: str,
+    prompt_text: str,
+    max_new_tokens: int = 30,
+    temperature: float = 0.7,
+    top_k: int = 50,
+    top_p: float = 0.9,
+) -> str:
     """Generates a next-token prediction sequence based on a user prompt.
 
     Uses the model's built-in generate method with advanced sampling.
@@ -131,10 +141,10 @@ def generate_response(model: WangGPT, device: str, prompt_text: str,
             max_new_tokens=max_new_tokens,
             temperature=temperature,
             top_k=top_k,
-            top_p=top_p
+            top_p=top_p,
         )
 
-    response_words = [IDX_TO_TOK[i.item()] for i in generated_idx[0][len(indices):]]
+    response_words = [IDX_TO_TOK[i.item()] for i in generated_idx[0][len(indices) :]]
     return " ".join(response_words)
 
 
@@ -150,12 +160,10 @@ def main():
     CONSOLE.print(Panel.fit(welcome_text, border_style="cyan"))
 
     # Filter out unified_vocab.pt and other non-model files
-    models = sorted([m for m in glob.glob("models/*.pt") if "unified_vocab"
-                     not in m])
+    models = sorted([m for m in glob.glob("models/*.pt") if "unified_vocab" not in m])
 
     if not models:
-        rprint("[bold red]Error: No models found. Run training first!"
-               "[/bold red]")
+        rprint("[bold red]Error: No models found. Run training first![/bold red]")
         return
 
     def select_and_load_model():
@@ -167,12 +175,15 @@ def main():
             table.add_row(str(i), os.path.basename(m))
 
         CONSOLE.print(table)
-        m_choice = IntPrompt.ask("Choose a Holocron",
-                                 choices=[str(i) for i in range(len(models))],
-                                 default=0)
+        m_choice = IntPrompt.ask(
+            "Choose a Holocron", choices=[str(i) for i in range(len(models))], default=0
+        )
 
-        with CONSOLE.status(f"[bold green]Syncing with {os.path.basename(
-            models[m_choice])}...[/bold green]"):
+        with CONSOLE.status(
+            f"[bold green]Syncing with {
+                os.path.basename(models[m_choice])
+            }...[/bold green]"
+        ):
             try:
                 model, _, device = load_checkpoint(models[m_choice])
                 return model, device, os.path.basename(models[m_choice])
@@ -184,10 +195,13 @@ def main():
     if model is None:
         return
 
-    rprint(f"\n[bold green]✅ Connection Established with {model_name}."
-           "[/bold green] Mode: [bold cyan]{device}[/bold cyan]")
-    rprint("[italic]Type '/exit' to terminate or '/switch' to change "
-           "models.[/italic]\n")
+    rprint(
+        f"\n[bold green]✅ Connection Established with {model_name}."
+        "[/bold green] Mode: [bold cyan]{device}[/bold cyan]"
+    )
+    rprint(
+        "[italic]Type '/exit' to terminate or '/switch' to change models.[/italic]\n"
+    )
 
     while True:
         u_input = Prompt.ask("[bold yellow]User[/bold yellow]")
@@ -200,20 +214,23 @@ def main():
             new_data = select_and_load_model()
             if new_data[0]:
                 model, device, model_name = new_data
-                rprint(f"\n[bold green]✅ Switched to {model_name}."
-                       "[/bold green]")
+                rprint(f"\n[bold green]✅ Switched to {model_name}.[/bold green]")
             continue
 
         if u_input.lower() in ["exit", "quit"]:
-            rprint("[yellow]Hint: Use '/exit' to terminate the "
-                   "session.[/yellow]")
+            rprint("[yellow]Hint: Use '/exit' to terminate the session.[/yellow]")
             continue
 
         with CONSOLE.status("[italic]Analyzing...[/italic]"):
             response = generate_response(model, device, u_input)
 
-        CONSOLE.print(Panel(response, title=f"[bold blue]DIY-GPT ({model_name})"
-                            "[/bold blue]", border_style="blue"))
+        CONSOLE.print(
+            Panel(
+                response,
+                title=f"[bold blue]DIY-GPT ({model_name})[/bold blue]",
+                border_style="blue",
+            )
+        )
 
 
 if __name__ == "__main__":

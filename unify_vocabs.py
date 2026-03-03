@@ -1,6 +1,7 @@
 import glob
 import os
 import re
+import zipfile
 from typing import Optional
 
 import torch
@@ -13,14 +14,21 @@ def consolidate_source_texts() -> None:
 
     Finds all .txt files in data/source_texts/, sorts them numerically
     by their index prefix, and concatenates them with two newlines
-    as a separator.
+    as a separator. Automatically unzips data.zip if source_texts is missing.
     """
     source_dir: str = "data/source_texts"
     output_file: str = "data/combined_star_wars.txt"
+    zip_file: str = "data.zip"
 
     if not os.path.exists(source_dir):
-        print(f"Error: Source directory {source_dir} not found.")
-        return
+        if os.path.exists(zip_file):
+            print(f">>> {source_dir} not found. Unzipping {zip_file}...")
+            with zipfile.ZipFile(zip_file, "r") as zip_ref:
+                zip_ref.extractall(".")
+            print(">>> Unzip complete.")
+        else:
+            print(f"Error: Neither {source_dir} nor {zip_file} found.")
+            return
 
     # Get all .txt files and sort by integer prefix
     files: list[str] = glob.glob(os.path.join(source_dir, "*.txt"))
@@ -44,7 +52,7 @@ def consolidate_source_texts() -> None:
     with open(output_file, "w", encoding="utf-8") as f:
         f.write("\n\n".join(combined_content))
 
-    print(f"Consolidation complete!")
+    print("Consolidation complete!")
 
 
 def main() -> None:
