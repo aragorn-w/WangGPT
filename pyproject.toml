@@ -1,0 +1,18 @@
+[project]
+name = "diy-gpt"
+version = "0.1.0"
+description = "A from-scratch GPT implementation trained on Star Wars novelizations"
+readme = "README.md"
+requires-python = ">=3.12"
+dependencies = [
+    "matplotlib>=3.10.8",
+    "numpy>=2.4.2",
+    "rich>=14.3.3",
+    "torch>=2.10.0",
+    "wandb>=0.25.0",
+]
+
+[dependency-groups]
+dev = [
+    "pytest>=9.0.2",
+]
