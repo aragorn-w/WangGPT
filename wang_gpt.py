@@ -28,6 +28,7 @@ class Config:
     d_mlp: Optional[int] = None
     dropout: float = 0.1
     tie_embeddings: bool = True
+    use_pos_emb: bool = True
 
     def __post_init__(self):
         if self.d_mlp is None:
@@ -229,8 +230,11 @@ class WangGPT(nn.Module):
         _, T = idx.size()
 
         token_embeddings: torch.Tensor = self.token_emb(idx)
-        position_embeddings: torch.Tensor = self.pos_emb[:, :T, :]
-        x: torch.Tensor = self.dropout(token_embeddings + position_embeddings)
+        x: torch.Tensor = token_embeddings
+        if self.config.use_pos_emb:
+            position_embeddings: torch.Tensor = self.pos_emb[:, :idx.size(1), :]
+            x = x + position_embeddings
+        x = self.dropout(x)
 
         for block in self.blocks:
             x = block(x)

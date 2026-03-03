@@ -132,7 +132,8 @@ def train_on_file(config_dict: dict[str, Any], all_tokens: list[str], curve_id: 
         d_model=dm,
         n_layers=config_dict["layers"],
         n_heads=4,
-        window_size=config_dict["window_size"]
+        window_size=config_dict["window_size"],
+        use_pos_emb=config_dict["use_pe"]
     )
     model = WangGPT(model_config)
 
@@ -228,8 +229,8 @@ if __name__ == "__main__":
         text_data = file.read()
     all_tokens = utils.clean_tokenization(text_data)
 
-    lrs = [3e-4, 5e-4]
-    batch_sizes = [32, 64]
+    lrs = [3e-4]
+    batch_sizes = [32]
     base_config = {"layers": 7, "window_size": 128, "iters": 50_000}
     best_curves = {}
 
