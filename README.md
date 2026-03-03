@@ -8,7 +8,7 @@ implemented from scratch in PyTorch. This project explores the architecture of m
 This project uses [uv](https://docs.astral.sh/uv/) for robust dependency management.
 
 ### 0. Download the Data
-Star Wars novelization data files are [hosted here on my Google Drive](https://drive.google.com/file/d/1G6x5uiZbvacg6NP9vq5xVFeIJnAjUdtf/view?usp=share_link). Unzip and move it into the repository project root.
+> All Star Wars novelization text data is contained within the .zip file [hosted here on my Google Drive](https://drive.google.com/file/d/1G6x5uiZbvacg6NP9vq5xVFeIJnAjUdtf/view?usp=share_link). Download the .zip file and move it (DO NOT UNZIP IT, that is done for you automatically) to the project root.
 
 ### 1. Install Dependencies
 ```bash
