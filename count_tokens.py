@@ -4,7 +4,7 @@ import os
 from utils import clean_tokenization
 
 
-def count_tokens_in_file(file_path: str):
+def count_tokens_in_file(file_path: str) -> int:
     """Calculates the number of cleaned tokens in a given text file.
 
     This function reads the specified file, applies the project-standard
@@ -20,26 +20,24 @@ def count_tokens_in_file(file_path: str):
     Raises:
     - FileNotFoundError: If the file_path is invalid.
     """
-
     if not os.path.exists(file_path):
         raise FileNotFoundError(f"Could not find file: {file_path}")
 
     with open(file_path, "r", encoding="utf-8") as f:
-        text = f.read()
+        text: str = f.read()
 
-    tokens = clean_tokenization(text)
+    tokens: list[str] = clean_tokenization(text)
     return len(tokens)
 
 
-def main():
+def main() -> None:
     """Finds all data files and reports their token counts.
 
     Identifies any .txt files in the data/ directory and prints a
     formatted summary of their token counts for use in training
     estimation and dataset analysis.
     """
-
-    data_files = sorted(glob.glob("data/*.txt"))
+    data_files: list[str] = sorted(glob.glob("data/*.txt"))
 
     if not data_files:
         print("No data files found in data/ directory.")
@@ -48,11 +46,11 @@ def main():
     print("\n{: <20} | {: <12}".format("File Name", "Token Count"))
     print("-" * 35)
 
-    total_tokens = 0
+    total_tokens: int = 0
     for file_path in data_files:
         try:
-            name = os.path.basename(file_path)
-            count = count_tokens_in_file(file_path)
+            name: str = os.path.basename(file_path)
+            count: int = count_tokens_in_file(file_path)
             print("{: <20} | {: <12,}".format(name, count))
             total_tokens += count
         except Exception as e:

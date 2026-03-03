@@ -1,229 +1,305 @@
+from dataclasses import dataclass
+from typing import Optional
+
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
 
-# shape notes to self are row-major (e.g. (# of rows, # of cols))
-# and 1-based for dimension index
 
+@dataclass
+class Config:
+    """Configuration dataclass for the WangGPT model.
 
-class EmbeddingLookup(nn.Module):
-    def __init__(self, d_v: int, d_m: int):
-        """Initializes the embedding lookup table.
+    Attributes:
+    - d_vocab: Size of the vocabulary.
+    - d_model: Dimension of the embedding vectors.
+    - n_layers: Number of transformer blocks.
+    - n_heads: Number of attention heads.
+    - window_size: Maximum sequence length.
+    - d_mlp: Dimension of the MLP hidden layer. Defaults to 4 * d_model.
+    - dropout: Dropout probability.
+    - tie_embeddings: Whether to tie token and unembedding weights.
+    """
+    d_vocab: int
+    d_model: int
+    n_layers: int
+    n_heads: int
+    window_size: int
+    d_mlp: Optional[int] = None
+    dropout: float = 0.1
+    tie_embeddings: bool = True
 
-        Args:
-        - d_v: Vocabulary size (number of unique tokens).
-        - d_m: Embedding dimension size.
-        """
-        super().__init__()
-        # shape = (d_m, d_v)
-        self.lookup = nn.Parameter(torch.randn(d_v, d_m) * 0.02)
+    def __post_init__(self):
+        if self.d_mlp is None:
+            self.d_mlp = 4 * self.d_model
 
-    def forward(self, token_indices: list[int]):
-        """Converts token indices into their corresponding embedding vectors.
-
-        Args:
-        - token_indices: A list or tensor of token indices.
-
-        Returns:
-        - A tensor of embeddings with shape (batch_size, sequence_length, d_m).
-        """
-        if isinstance(token_indices, list):
-            token_indices = torch.tensor(token_indices, dtype=torch.long,
-                                         device=self.lookup.device)
-        if token_indices.dim() == 1:
-            token_indices = token_indices.unsqueeze(0)
-        # shape = (b, t, d_m)
-        return self.lookup[token_indices]
 
 class RMSNorm(nn.Module):
-    def __init__(self, d_m: int):
-        """Initializes the Root Mean Square Layer Normalization.
+    """Root Mean Square Layer Normalization.
 
-        Args:
-        - d_m: Dimension of the input features to normalize.
-        """
+    Args:
+    - d_model: Dimension of the input features.
+    - eps: Small constant for numerical stability.
+    """
+    def __init__(self, d_model: int, eps: float = 1e-6):
         super().__init__()
-        self.gamma = nn.Parameter(torch.ones(d_m))
-        self.epsilon = 1e-6
+        self.eps: float = eps
+        self.weight: nn.Parameter = nn.Parameter(torch.ones(d_model))
 
-    def forward(self, X: torch.tensor):
+    def forward(self, x: torch.Tensor) -> torch.Tensor:
         """Applies RMS normalization to the input tensor.
 
         Args:
-        - X: Input tensor of shape (batch_size, sequence_length, d_m).
+        - x: Input tensor.
 
         Returns:
-        - Normalized tensor of the same shape.
+        - Normalized tensor.
         """
-        # X has dimensions (b, t, d_m)
-        recip_rms: torch.tensor = torch.rsqrt(X.pow(2).mean(-1, keepdim=True)
-                                          + self.epsilon)
-        X = (X * recip_rms) * self.gamma
-        return X
+        norm: torch.Tensor = x.pow(2).mean(-1, keepdim=True)
+        x = x * torch.rsqrt(norm + self.eps)
+        return x * self.weight
 
-class MultiHeadTransformerBlock(nn.Module):
-    def __init__(self, d_m: int, h: int):
-        """Initializes a Multi-Head Attention Transformer Block.
 
-        Args:
-        - d_m: Embedding dimension size.
-        - h: Number of attention heads.
-        """
+class MultiHeadAttention(nn.Module):
+    """Multi-Head Attention layer with causal masking.
+
+    Args:
+    - config: Configuration object.
+    """
+    def __init__(self, config: Config):
         super().__init__()
-        # h = # of attention heads
-        self.h: int = h
-        self.d_k: int = d_m // h
+        assert config.d_model % config.n_heads == 0
+        self.n_heads: int = config.n_heads
+        self.d_head: int = config.d_model // config.n_heads
 
-        # Combine the query, key, and value weight matrices into one
-        # to linearly project to the Q, K, and V matrices in parallel
-        # shape = (d_m, 3*d_m)
-        self.W_QKV: torch.tensor = nn.Parameter(torch.randn(d_m, 3*d_m) * 0.02)
-        # shape = (d_m, d_m)
-        self.W_O: torch.tensor = nn.Parameter(torch.randn(d_m, d_m) * 0.02)
-        # The number of hidden neurons for the MLP feed forward layer
-        self.d_ff: int = 4 * d_m
-        self.Wff_in = nn.Parameter(torch.randn(d_m, self.d_ff) * 0.02)
-        self.Wff_out = nn.Parameter(torch.randn(self.d_ff, d_m) * 0.02)
+        # Split projections (Extra Credit: "efficient split version")
+        self.q_proj: nn.Linear = nn.Linear(config.d_model, config.d_model,
+                                           bias=False)
+        self.k_proj: nn.Linear = nn.Linear(config.d_model, config.d_model,
+                                           bias=False)
+        self.v_proj: nn.Linear = nn.Linear(config.d_model, config.d_model,
+                                           bias=False)
+        self.o_proj: nn.Linear = nn.Linear(config.d_model, config.d_model,
+                                           bias=False)
 
-        # RMS normalization layers
-        self.rms_norm_1 = RMSNorm(d_m)
-        self.rms_norm_2 = RMSNorm(d_m)
+        self.dropout: nn.Dropout = nn.Dropout(config.dropout)
+        self.register_buffer("mask", torch.tril(torch.ones(config.window_size,
+                                                           config.window_size))
+                             .view(1, 1, config.window_size,
+                                   config.window_size))
 
-    def forward(self, X: torch.tensor):
-        """Performs the forward pass of the transformer block.
+    def forward(self, x: torch.Tensor) -> torch.Tensor:
+        """Computes multi-head attention.
 
         Args:
-        - X: Input tensor of shape (batch_size, sequence_length, d_m).
+        - x: Input tensor of shape (B, T, C).
 
         Returns:
-        - Contextualized tensor of the same shape.
+        - Attention output of shape (B, T, C).
         """
-        b: int
-        t: int
-        d_m: int
-        b, t, d_m = X.shape
+        B, T, C = x.size()
 
-        # shape = (b, t, d_m) x (d_m, 3*d_m) = (b, t, 3*d_m)
-        QKV: torch.Tensor = torch.matmul(self.rms_norm_1(X), self.W_QKV)
-        Q: torch.Tensor
-        K: torch.Tensor
-        V: torch.Tensor
-        # RMS normalize X, compute the QKV concatenated tensor, then
-        # split it into chunks of d_m size along token index (3rd dim)
-        # all Q, K, V shapes = (b, t, d_m)
-        Q, K, V = QKV.split(d_m, dim=2)
-        # all Q, V, K shapes = (b, t, h, d_k)^T(2, 3) = (b, h, t, d_k)
-        Q = Q.view(b, t, self.h, self.d_k).transpose(1, 2)
-        K = K.view(b, t, self.h, self.d_k).transpose(1, 2)
-        V = V.view(b, t, self.h, self.d_k).transpose(1, 2)
+        q: torch.Tensor = self.q_proj(x).view(B, T, self.n_heads, self.d_head)\
+            .transpose(1, 2)
+        k: torch.Tensor = self.k_proj(x).view(B, T, self.n_heads, self.d_head)\
+            .transpose(1, 2)
+        v: torch.Tensor = self.v_proj(x).view(B, T, self.n_heads, self.d_head)\
+            .transpose(1, 2)
 
-        # Calculate the attention scores for each directional word-to-word
-        # (use tensor contraction of non-batch dimensions)
-        # shape = (b, h, t, d_k) x (b, h, d_k, t)
-        # treat as (t, d_k) x (d_k, t) = (t, t)
-        # and as batch, (b, h, t, t)
-        A_scores: torch.tensor = torch.matmul(Q, K.transpose(-2, -1))
-        # Trick from original transformer paper to prevent gradient explosion
-        A_scores /= self.d_k**0.5
+        att: torch.Tensor = (q @ k.transpose(-2, -1)) * \
+            (1.0 / (self.d_head ** 0.5))
+        att = att.masked_fill(self.mask[:,:,:T,:T] == 0, float("-inf"))
+        att = F.softmax(att, dim=-1)
+        att = self.dropout(att)
 
-        # Hide future tokens from each head
-        M: torch.tensor = torch.triu(
-            torch.ones(b, self.h, t, t, device=X.device), diagonal=1)
-        A_scores = A_scores.masked_fill(M == 1, float("-inf"))
+        y: torch.Tensor = att @ v
+        y = y.transpose(1, 2).contiguous().view(B, T, C)
+        return self.o_proj(y)
 
-        # Normalize self-attention scores of non-future tokens
-        A_scores = F.softmax(A_scores, dim=-1)
 
-        # Contextualize the attention scores and prepare to merge the heads
-        # (use tensor contraction of non-batch dimensions)
-        # shape = ((b, h, t, t) x (b, h, t, d_k))^T(2, 3)
-        # treat as ((t, t) x (t, d_k))^T(2, 3) = (t, d_k)^T(2, 3)
-        # and as batch, (b, h, t, d_k)^T(2, 3) = (b, t, h, d_k)
-        A_values: torch.tensor = torch.matmul(A_scores, V).transpose(1, 2)
-        # Merge the heads
-        # shape = (b, t, h, d_k) -> (b, t, h*d_k) -> (b, t, d_m)
-        A_values = A_values.contiguous().view(b, t, d_m)
-        # Tensor contraction of non-batch dimensions and "mixing" of heads
-        # shape = (b, t, d_m) x (d_m, d_m)
-        # treat as (t, d_m) x (d_m, d_m) = (t, d_m)
-        # and as batch, (b, t, d_m)
-        A_values = torch.matmul(A_values, self.W_O)
-        # Add projected attention values back to input embeddings as residual
-        X = X + A_values
+class MLP(nn.Module):
+    """Feed-forward multi-layer perceptron.
 
-        # MLP layer to sparsely emphasize most important embedding dims
-        # Pass to MLP feedforward layer's hidden neurons
-        # (use tensor contraction of non-batch dimensions)
-        # shape = (b, t, d_m) x (d_m, d_ff)
-        # treat as (t, d_m) x (d_m, d_ff) = (t, d_ff)
-        # and as batch, (b, t, d_ff)
-        FF_values: torch.tensor = F.relu(torch.matmul(self.rms_norm_2(X),
-                                                      self.Wff_in))
-        # Go from MLP FF layer's hidden neurons to output neurons
-        # (use tensor contraction of non-batch dimensions)
-        # shape = (b, t, d_ff) x (d_ff, d_m)
-        # treat as (t, d_ff) x (d_ff, d_m) = (t, d_m)
-        # and as batch, (b, t, d_m)
-        FF_values = torch.matmul(FF_values, self.Wff_out)
-        # Add MLP feed forward outputs back to X as second residual
-        X = X + FF_values
+    Args:
+    - config: Configuration object.
+    """
+    def __init__(self, config: Config):
+        super().__init__()
+        self.fc1: nn.Linear = nn.Linear(config.d_model, config.d_mlp,
+                                        bias=False)
+        self.fc2: nn.Linear = nn.Linear(config.d_mlp, config.d_model,
+                                        bias=False)
+        self.dropout: nn.Dropout = nn.Dropout(config.dropout)
+        self.act: nn.ReLU = nn.ReLU()
 
-        return X
+    def forward(self, x: torch.Tensor) -> torch.Tensor:
+        """Forward pass of the MLP.
+
+        Args:
+        - x: Input tensor.
+
+        Returns:
+        - Output tensor.
+        """
+        x = self.fc1(x)
+        x = self.act(x)
+        x = self.fc2(x)
+        return self.dropout(x)
+
+
+class Block(nn.Module):
+    """Transformer block consisting of attention and MLP.
+
+    Args:
+    - config: Configuration object.
+    """
+    def __init__(self, config: Config):
+        super().__init__()
+        self.norm1: RMSNorm = RMSNorm(config.d_model)
+        self.attn: MultiHeadAttention = MultiHeadAttention(config)
+        self.norm2: RMSNorm = RMSNorm(config.d_model)
+        self.mlp: MLP = MLP(config)
+
+    def forward(self, x: torch.Tensor) -> torch.Tensor:
+        """Forward pass of the transformer block.
+
+        Args:
+        - x: Input tensor.
+
+        Returns:
+        - Output tensor after residual connections.
+        """
+        x = x + self.attn(self.norm1(x))
+        x = x + self.mlp(self.norm2(x))
+        return x
 
 
 class WangGPT(nn.Module):
-    def __init__(self, d_v: int, d_m: int, num_tbs: int, w: int, b: int, use_pe: bool = True):
-        """Initializes the Star Wars DIY-GPT model.
+    """The full WangGPT autoregressive transformer model.
 
-        Args:
-        - d_v: Vocabulary size.
-        - d_m: Embedding dimension size.
-        - num_tbs: Number of transformer blocks to stack.
-        - w: Window size (max sequence length).
-        - b: Batch size (for internal tracking).
-        - use_pe: Whether to apply positional encodings.
-        """
+    Args:
+    - config: Configuration object.
+    """
+    def __init__(self, config: Config):
         super().__init__()
-        self.d_v = d_v # Number of vocabulary words
-        self.d_m = d_m # Number of embedding dimensions
-        self.num_tbs = num_tbs # Number of transformer blocks
-        self.w = w # Number of tokens in training window
-        self.b = b # Number of training windows per batch
-        self.use_pe = use_pe # Toggle for positional encodings
-        self.E = EmbeddingLookup(d_v, d_m)
-        # PE = positional encoding
-        if use_pe:
-            self.PE = nn.Parameter(torch.randn(w, d_m) * 0.02)
-        self.TBs = nn.ModuleList([MultiHeadTransformerBlock(d_m, 4)
-                                  for _ in range(num_tbs)])
-        self.rms_norm = RMSNorm(d_m)
-        self.U = nn.Parameter(torch.randn(d_m, d_v) * 0.01)
+        self.config: Config = config
 
-    def forward(self, tok_idxs):
-        """Performs the forward pass to predict the next tokens.
+        self.token_emb: nn.Embedding = nn.Embedding(config.d_vocab,
+                                                    config.d_model)
+        self.pos_emb: nn.Parameter = nn.Parameter(
+            torch.zeros(1, config.window_size, config.d_model))
+        self.dropout: nn.Dropout = nn.Dropout(config.dropout)
+
+        self.blocks: nn.ModuleList = nn.ModuleList([Block(config) for _
+                                                    in range(config.n_layers)])
+        self.norm_f: RMSNorm = RMSNorm(config.d_model)
+        self.lm_head: nn.Linear = nn.Linear(config.d_model, config.d_vocab,
+                                            bias=False)
+
+        if config.tie_embeddings:
+            self.lm_head.weight = self.token_emb.weight
+
+        self.apply(self._init_weights)
+
+    def _init_weights(self, module: nn.Module) -> None:
+        """Initializes model weights.
 
         Args:
-        - tok_idxs: Tensor of token indices with shape (batch_size, sequence_length).
+        - module: PyTorch module to initialize.
+        """
+        if isinstance(module, nn.Linear):
+            torch.nn.init.normal_(module.weight, mean=0.0, std=0.02)
+            if module.bias is not None:
+                torch.nn.init.zeros_(module.bias)
+        elif isinstance(module, nn.Embedding):
+            torch.nn.init.normal_(module.weight, mean=0.0, std=0.02)
+
+    def forward(self, idx: torch.Tensor,
+                targets: Optional[torch.Tensor] = None) -> \
+    tuple[torch.Tensor, Optional[torch.Tensor]]:
+        """Performs the forward pass of the model.
+
+        Args:
+        - idx: Tensor of token indices.
+        - targets: Optional ground truth token indices for loss calculation.
 
         Returns:
-        - Logits for each vocabulary word with shape (batch_size, sequence_length, d_v).
+        - A tuple (logits, loss). Loss is None if targets is not provided.
         """
-        # Convert token indices to embedding vectors
-        X = self.E(tok_idxs)
+        _, T = idx.size()
 
-        # Add token positional encodings
-        if self.use_pe:
-            X = X + self.PE[:X.shape[1], :]
+        token_embeddings: torch.Tensor = self.token_emb(idx)
+        position_embeddings: torch.Tensor = self.pos_emb[:, :T, :]
+        x: torch.Tensor = self.dropout(token_embeddings + position_embeddings)
 
-        # Self-attention layer to contextualize window of embeddings
-        for TB in self.TBs:
-            X = TB(X)
+        for block in self.blocks:
+            x = block(x)
 
-        # RMS normalize the output before unembedding it for the classifier
-        X = self.rms_norm(X)
+        x = self.norm_f(x)
+        logits: torch.Tensor = self.lm_head(x)
 
-        # Unembedding matrix to derive predicted token indices
-        # (use tensor contraction of non-batch dimensions)
-        # shape = (b, t, d_m) x (d_m, d_v) = (b, t, d_v)
-        X = torch.matmul(X, self.U)
-        return X
+        loss: Optional[torch.Tensor] = None
+        if targets is not None:
+            loss = F.cross_entropy(logits.view(-1, logits.size(-1)),
+                                   targets.view(-1))
+
+        return logits, loss
+
+    @torch.no_grad()
+    def generate(self, idx: torch.Tensor, max_new_tokens: int,
+                 temperature: float = 1.0, top_k: Optional[int] = None,
+                 top_p: Optional[float] = None) -> torch.Tensor:
+        """Generates text autoregressively with varied sampling methods.
+
+        Supports Temperature, Top-K, and Top-P (Nucleus) sampling.
+
+        Args:
+        - idx: Initial token indices.
+        - max_new_tokens: Number of tokens to generate.
+        - temperature: Sampling temperature.
+        - top_k: Only sample from the top K tokens.
+        - top_p: Only sample from tokens with cumulative probability < top_p.
+
+        Returns:
+        - Tensor containing the generated token indices.
+        """
+        self.eval()
+        for _ in range(max_new_tokens):
+            # Crop index if it exceeds window size
+            idx_cond = idx if idx.size(1) <= self.config.window_size \
+            else idx[:, -self.config.window_size:]
+
+            logits, _ = self(idx_cond)
+            # Focus only on the last time step
+            logits = logits[:, -1, :] / temperature
+
+            # Optional: Top-K sampling
+            if top_k is not None:
+                v, _ = torch.topk(logits, min(top_k, logits.size(-1)))
+                logits[logits < v[:, [-1]]] = -float("inf")
+
+            # Optional: Top-P (Nucleus) sampling
+            if top_p is not None:
+                sorted_logits, sorted_indices = torch.sort(logits,
+                                                           descending=True)
+                cumulative_probs = torch.cumsum(F.softmax(sorted_logits,
+                                                          dim=-1), dim=-1)
+
+                # Remove tokens with cumulative probability above the threshold
+                sorted_indices_to_remove = cumulative_probs > top_p
+                # Shift the indices to the right to keep the first token
+                # above the threshold
+                sorted_indices_to_remove[..., 1:] = \
+                    sorted_indices_to_remove[..., :-1].clone()
+                sorted_indices_to_remove[..., 0] = 0
+
+                for b in range(logits.size(0)):
+                    indices_to_remove = \
+                        sorted_indices[b, sorted_indices_to_remove[b]]
+                    logits[b, indices_to_remove] = -float("inf")
+
+            probs = F.softmax(logits, dim=-1)
+            idx_next = torch.multinomial(probs, num_samples=1)
+            idx = torch.cat((idx, idx_next), dim=1)
+
+        return idx

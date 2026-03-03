@@ -1,43 +1,43 @@
 import glob
 import os
 import re
+from typing import Optional
 
 import torch
 
 from utils import clean_tokenization
 
 
-def consolidate_source_texts():
+def consolidate_source_texts() -> None:
     """Combines all source text files into one based on their prefix index.
 
     Finds all .txt files in data/source_texts/, sorts them numerically
     by their index prefix, and concatenates them with two newlines
     as a separator.
     """
-
-    source_dir = "data/source_texts"
-    output_file = "data/combined_star_wars.txt"
+    source_dir: str = "data/source_texts"
+    output_file: str = "data/combined_star_wars.txt"
 
     if not os.path.exists(source_dir):
         print(f"Error: Source directory {source_dir} not found.")
         return
 
     # Get all .txt files and sort by integer prefix
-    files = glob.glob(os.path.join(source_dir, "*.txt"))
+    files: list[str] = glob.glob(os.path.join(source_dir, "*.txt"))
 
-    def get_index(f):
-        match = re.search(r"(\d+)_", os.path.basename(f))
+    def get_index(f: str) -> int:
+        match: Optional[re.Match] = re.search(r"(\d+)_", os.path.basename(f))
         return int(match.group(1)) if match else 999
 
-    sorted_files = sorted(files, key=get_index)
+    sorted_files: list[str] = sorted(files, key=get_index)
 
     print(f"Consolidating {len(sorted_files)} source files into {output_file}...")
-    combined_content = []
+    combined_content: list[str] = []
     for f_path in sorted_files:
         with open(f_path, "r", encoding="utf-8") as f:
-            content = f.read().strip()
+            content: str = f.read().strip()
             # Remove all non-ASCII characters
-            ascii_content = content.encode("ascii", "ignore").decode("ascii")
+            ascii_content: str = content.encode("ascii", "ignore").decode("ascii")
             combined_content.append(ascii_content)
 
     # Join with two newlines
@@ -47,25 +47,24 @@ def consolidate_source_texts():
     print(f"Consolidation complete!")
 
 
-def main():
+def main() -> None:
     """Orchestrates the data consolidation and vocabulary generation.
 
     First combines the source text files, then generates a unified vocabulary
     from the combined output to ensure cross-model consistency.
     """
-
     # Consolidate files
     consolidate_source_texts()
 
     # Build vocabulary
-    source_file = "data/combined_star_wars.txt"
+    source_file: str = "data/combined_star_wars.txt"
     print(f"Generating unified vocabulary from {source_file}...")
 
     with open(source_file, "r", encoding="utf-8") as f:
-        text = f.read()
+        text: str = f.read()
 
-    tokens = clean_tokenization(text)
-    vocab = sorted(list(set(tokens)))
+    tokens: list[str] = clean_tokenization(text)
+    vocab: list[str] = sorted(list(set(tokens)))
 
     torch.save(vocab, "models/unified_vocab.pt")
     print(f"Unified vocabulary saved! Size: {len(vocab)} words.")

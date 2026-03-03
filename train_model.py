@@ -1,188 +1,210 @@
-import gc
+import importlib
 import os
 from itertools import product
+from typing import Any, Optional
 
+import matplotlib.pyplot as plt
 import torch
 import torch.nn as nn
 import torch.optim as optim
 import wandb
 
 from utils import clean_tokenization,\
-    UNIFIED_VOCAB, TOK_TO_IDX, VOCAB_SIZE
-from wang_gpt import WangGPT
-
-
-import matplotlib.pyplot as plt
+    UNIFIED_VOCAB, TOK_TO_IDX, VOCAB_SIZE, translate_state_dict
+from wang_gpt import WangGPT, Config
+from unify_vocabs import main as build_vocab
 
 MAX_NUM_PARAMS = 10_000_000
 
-def get_batch(data: torch.Tensor, iter: int, batch_size: int,
-              win_size: int, device: str):
-    """Generates a batch of training inputs and targets.
 
-    Slices the tokenized data into windows of size 'win_size' and shifts
-    them by one token to create input-target pairs for next-token prediction.
+def get_batch(data: torch.Tensor, iter: int, batch_size: int,
+              win_size: int, device: str) -> tuple[torch.Tensor, torch.Tensor]:
+    """Generates a batch of input-target pairs from the training data.
 
     Args:
-    - data: The full tensor of token indices.
-    - iter: The current iteration number for determining start position.
-    - batch_size: Number of training windows per batch.
-    - win_size: The number of tokens per training window.
-    - device: The torch device (cuda/cpu) to place the tensors on.
+    - data: Tensor containing all tokenized training data.
+    - iter: Current iteration number for batch offset calculation.
+    - batch_size: Number of sequences per batch.
+    - win_size: Length of each sequence.
+    - device: Device to move the tensors to (e.g., 'cuda' or 'cpu').
 
     Returns:
     - A tuple (x, y) where x is the input batch and y is the target batch.
     """
-
-    max_idx = len(data) - win_size - 1
+    max_idx: int = len(data) - win_size - 1
     if max_idx <= 0:
         return \
             torch.zeros((batch_size, win_size), dtype=torch.long).to(device), \
                 torch.zeros((batch_size, win_size), dtype=torch.long).to(device)
-    start_pos = (iter * batch_size) % max_idx
-    indices = [(start_pos + i) % max_idx for i in range(batch_size)]
-    x = torch.stack([data[idx: idx + win_size] for idx in indices])
-    y = torch.stack([data[idx + 1: idx + 1 + win_size] for idx in indices])
+    start_pos: int = (iter * batch_size) % max_idx
+    indices: list[int] = [(start_pos + i) % max_idx for i in range(batch_size)]
+    x: torch.Tensor = torch.stack([data[idx: idx + win_size] for idx
+                                   in indices])
+    y: torch.Tensor = torch.stack([data[idx + 1: idx + 1 + win_size] for
+                                   idx in indices])
     return x.to(device), y.to(device)
 
+def get_optimal_dm(vocab_size: int, num_tbs: int, window_size: int, target_params: int = MAX_NUM_PARAMS) -> int:
+    """Calculates the optimal d_model to fit within a parameter budget.
 
-def get_optimal_dm(vocab_size, num_tbs, window_size, use_pe, target_params=MAX_NUM_PARAMS):
-    """Calculates the optimal embedding dimension d_m to hit a parameter target.
-
-    Uses a quadratic solver to find the d_m that brings the total parameter
-    count closest to 'target_params', ensuring h=4 attention head compatibility.
+    Uses a quadratic formula derived from the model's architecture.
 
     Args:
     - vocab_size: Size of the vocabulary.
     - num_tbs: Number of transformer blocks.
-    - window_size: Size of the context window.
-    - use_pe: Boolean indicating if positional encodings are used.
-    - target_params: The desired total parameter count (default 10M).
+    - window_size: Maximum sequence length.
+    - target_params: Maximum allowed parameters.
 
     Returns:
-    - The integer d_m (clamped to multiple of 4).
+    - The optimal embedding dimension (d_m) as an integer multiple of 4.
     """
+    # Updated formula for the new architecture:
+    # token_emb: V * dm
+    # pos_emb: window * dm
+    # blocks (L): 4 * dm^2 (attention) + 2 * dm * (4 * dm) (mlp) = 12 * dm^2
+    # norm_f: dm
+    # lm_head: dm * V (tied with token_emb, so we count V*dm once)
+    # Total ~ L * 12 * dm^2 + (V + window + 1) * dm
+    a: int = 12 * num_tbs
+    b: int = vocab_size + window_size + 1
+    c: int = -target_params
+    dm: float = (-b + (b**2 - 4*a*c)**0.5) / (2*a)
+    dm_int: int = int(round(dm / 4) * 4)
+    return dm_int
 
-    a = 12 * num_tbs
-    b = 2 * vocab_size + (window_size if use_pe else 0) + 2 * num_tbs + 1
-    c = -target_params
+def train_on_file(config_dict: dict[str, Any], all_tokens: list[str], curve_id: str = "") -> tuple[float, list[tuple[int, float]], dict[str, torch.Tensor], dict[str, Any], Optional[list[str]]]:
+    """Trains a model on a specific text file with given hyperparameters.
 
-    # Quadratic formula
-    dm = (-b + (b**2 - 4*a*c)**0.5) / (2*a)
-
-    # Round to nearest multiple of 4 (for 4 attention heads)
-    dm = int(round(dm / 4) * 4)
-    return dm
-
-
-def train_on_file(file_path, config, all_tokens, curve_id=""):
-    """Executes a single training run for a specific model configuration.
-
-    Handles model initialization, DataParallel distribution, AdamW optimization,
-    and logging to wandb and stdout.
+    Handles dataset splitting, logging to Weights & Biases, and checkpointing.
 
     Args:
-    - file_path: Path to the data file.
-    - config: Dictionary containing hyperparameters (lr, bs, layers, etc).
-    - all_tokens: List of token strings for the entire dataset.
-    - curve_id: Identifier string for grouping curves in logging.
+    - config_dict: Dictionary containing hyperparameters (lr, layers, etc.).
+    - all_tokens: List of pre-tokenized words from the corpus.
+    - curve_id: Label for identifying this run in plots.
 
     Returns:
-    - A tuple (last_loss, loss_history, state_dict, final_config, vocab).
+    - A tuple (last_loss, loss_history, model_state_dict, config, vocab).
     """
-
     import utils
     vocab_size = utils.VOCAB_SIZE
     tok_to_idx = utils.TOK_TO_IDX
-    unified_vocab = utils.UNIFIED_VOCAB
 
-    # Extract file name for logging
-    file_name = os.path.basename(file_path).split(".")[0]
+    dm = get_optimal_dm(vocab_size, config_dict["layers"],
+                        config_dict["window_size"])
+    config_dict["d_m"] = dm
+    run_name = \
+        f"{curve_id}-lr{config_dict['lr']}-bs{config_dict['batch_size']}-dm{dm}"
+    checkpoint_path = f"models/{run_name}.pt"
 
-    # Dynamically calculate d_m
-    dm = get_optimal_dm(vocab_size, config["layers"], config["window_size"],
-                        config["use_pe"])
-    config["d_m"] = dm
-
-    run_name = f"{curve_id}-lr{config["lr"]}-bs{config["batch_size"]}-dm{dm}"
-    print(f"\n>>> STARTING RUN: {run_name} (V: {vocab_size}, d_m: {dm}, "
-          "PE: {config[\"use_pe\"]})")
+    if os.path.exists(checkpoint_path):
+        ckpt = torch.load(checkpoint_path, map_location="cpu")
+        # Check if it's truly finished or just a periodic checkpoint
+        if len(ckpt.get("history", [])) >= (config_dict["iters"] // 100):
+            print(f">>> SKIPPING: {run_name} (Found completed run)")
+            return ckpt["last_loss"], ckpt["history"], \
+                ckpt["model_state_dict"], ckpt["config"], ckpt["vocab"]
+        else:
+            print(f">>> RESUMING: {run_name} from iteration "
+                  f"{ckpt['history'][-1][0]}")
+            start_iter = ckpt["history"][-1][0]
+            loss_history = ckpt["history"]
+    else:
+        print(f"\n>>> STARTING RUN: {run_name} (V: {vocab_size}, d_m: {dm})")
+        start_iter = 0
+        loss_history = []
 
     split_idx = int(len(all_tokens) * 0.8)
     train_tokens = all_tokens[:split_idx]
-    train_data = torch.tensor([tok_to_idx[w] for w in train_tokens],
-                              dtype=torch.long)
+    train_data = torch.tensor([tok_to_idx[w] for w in train_tokens
+                               if w in tok_to_idx], dtype=torch.long)
 
-    # Initialize Weights and Biases logging
     wandb.init(
         project="star-wars-gpt",
         name=run_name,
         group=curve_id,
-        config={**config, "file": file_name, "vocab_size": vocab_size},
+        config={**config_dict, "vocab_size": vocab_size},
         reinit=True
     )
 
-    # Set up the model
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
-    model = WangGPT(
-        d_v=vocab_size,
-        d_m=config["d_m"],
-        num_tbs=config["layers"],
-        w=config["window_size"],
-        b=config["batch_size"],
-        use_pe=config["use_pe"]
+    model_config = Config(
+        d_vocab=vocab_size,
+        d_model=dm,
+        n_layers=config_dict["layers"],
+        n_heads=4,
+        window_size=config_dict["window_size"]
     )
+    model = WangGPT(model_config)
+
+    if start_iter > 0:
+        model.load_state_dict(ckpt["model_state_dict"])
 
     model.to(device)
     if torch.cuda.device_count() > 1:
         model = nn.DataParallel(model)
 
-    model_for_params = model.module if isinstance(model, nn.DataParallel) \
-        else model
-    total_params = sum(p.numel() for p in model_for_params.parameters())
-    print(f"Total Parameters: {total_params / 1e6:.2f}M")
-
-    optimizer = optim.AdamW(model.parameters(), lr=config["lr"],
+    optimizer = optim.AdamW(model.parameters(), lr=config_dict["lr"],
                             betas=(0.9, 0.95), weight_decay=0.1)
-    loss_func = nn.CrossEntropyLoss()
 
-    loss_history = []
     model.train()
-    for iter in range(config["iters"]):
-        inputs, outputs = get_batch(train_data, iter, config["batch_size"],
-                                    config["window_size"], device)
-        logits = model(inputs)
-        loss = loss_func(logits.view(-1, vocab_size), outputs.view(-1))
+    last_loss = 0
+    for iter in range(start_iter, config_dict["iters"]):
+        inputs, outputs = get_batch(train_data, iter,
+                                    config_dict["batch_size"],
+                                    config_dict["window_size"], device)
+        _, loss = model(inputs, targets=outputs)
+
+        # Average loss if using DataParallel
+        if isinstance(model, nn.DataParallel):
+            loss = loss.mean()
 
         optimizer.zero_grad()
         loss.backward()
         optimizer.step()
 
         if iter % 100 == 0:
-            loss_val = loss.item()
-            loss_history.append((iter, loss_val))
-            wandb.log({"loss": loss_val}, step=iter)
+            last_loss = loss.item()
+            loss_history.append((iter, last_loss))
+            wandb.log({"loss": last_loss}, step=iter)
             if iter % 5000 == 0:
-                print(f"Iter {iter:<5} | Loss: {loss_val:.4f}")
+                print(f"Iter {iter:<5} | Loss: {last_loss:.4f}")
+                # Periodic checkpoint
+                state_dict = model.module.state_dict() if isinstance(
+                    model, nn.DataParallel) else model.state_dict()
+                torch.save({
+                    "last_loss": last_loss,
+                    "history": loss_history,
+                    "model_state_dict": state_dict,
+                    "config": config_dict,
+                    "vocab": utils.UNIFIED_VOCAB
+                }, checkpoint_path)
 
     wandb.finish()
 
-    # Return everything needed for best-model selection
-    return loss_val, loss_history, model_for_params.state_dict(), config, \
-        unified_vocab
+    state_dict = model.module.state_dict() if isinstance(
+        model, nn.DataParallel) else model.state_dict()
 
+    torch.save({
+        "last_loss": last_loss,
+        "history": loss_history,
+        "model_state_dict": state_dict,
+        "config": config_dict,
+        "vocab": utils.UNIFIED_VOCAB
+    }, checkpoint_path)
 
-def save_plot(curves, title, filename):
-    """Generates a loss curve comparison plot using Matplotlib.
+    return last_loss, loss_history, state_dict, config_dict, utils.UNIFIED_VOCAB
+
+def save_plot(curves: dict, title: str, filename: str):
+    """Generates and saves a Matplotlib plot of training loss curves.
 
     Args:
-    - curves: Dict with model labels as keys, values as (iter, loss) histories.
-    - title: String for the plot title.
-    - filename: Output file path for the plot.
+    - curves: Dictionary mapping model names to their loss history lists.
+    - title: Title of the plot.
+    - filename: Path to save the resulting image file.
     """
-
     plt.figure(figsize=(10, 6))
     for name, history in curves.items():
+        if not history: continue
         iters, losses = zip(*history)
         plt.plot(iters, losses, label=name)
     plt.xlabel("Iteration")
@@ -193,18 +215,14 @@ def save_plot(curves, title, filename):
     plt.savefig(filename)
     plt.close()
 
-
 if __name__ == "__main__":
-    # Ensure unified vocab exists
-    from unify_vocabs import main as build_vocab
+    # Build initial vocab if it doesn't exist
     build_vocab()
 
-    # Re-import vocab after building to get updated values
+    # Reload utils so VOCAB_SIZE and other constants are updated
     import utils
-    import importlib
     importlib.reload(utils)
 
-    # Target data file
     file_path = "data/combined_star_wars.txt"
     with open(file_path, "r", encoding="utf-8") as file:
         text_data = file.read()
@@ -212,94 +230,53 @@ if __name__ == "__main__":
 
     lrs = [3e-4, 5e-4]
     batch_sizes = [32, 64]
-    base_config = {
-        "layers": 7,
-        "window_size": 128,
-        "iters": 50_000
-    }
-
+    base_config = {"layers": 7, "window_size": 128, "iters": 50_000}
     best_curves = {}
 
-    # Random model (no training) baseline
-    print("\n--- Generating Random Initialization Model ---")
-    dm_rand = get_optimal_dm(utils.VOCAB_SIZE, base_config["layers"],
-                             base_config["window_size"], True)
-    rand_model = WangGPT(utils.VOCAB_SIZE, dm_rand, base_config["layers"],
-                         base_config["window_size"], 32, use_pe=True)
+    # Establish random baseline
+    if os.path.exists("models/random_init.pt"):
+        rand_ckpt = torch.load("models/random_init.pt", map_location="cpu")
+        best_curves["random_init"] = rand_ckpt.get("history", [])
+    else:
+        print("\n--- Generating Random Initialization Model ---")
+        dm_rand = get_optimal_dm(utils.VOCAB_SIZE, base_config["layers"],
+                                 base_config["window_size"])
+        model_config = Config(utils.VOCAB_SIZE, dm_rand, base_config["layers"],
+                              4, base_config["window_size"])
+        rand_model = WangGPT(model_config)
 
-    # Calculate random loss
-    device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
-    rand_model.to(device)
-    split_idx = int(len(all_tokens) * 0.8)
-    train_tokens = all_tokens[:split_idx]
-    train_data = torch.tensor([utils.TOK_TO_IDX[w] for w in train_tokens],
-                              dtype=torch.long)
-    inputs, outputs = get_batch(train_data, 0, 32, 128, device)
-    with torch.no_grad():
-        logits = rand_model(inputs)
-        rand_loss = nn.CrossEntropyLoss()(logits.view(-1, utils.VOCAB_SIZE),
-                                          outputs.view(-1)).item()
+        torch.save({
+            "model_state_dict": rand_model.state_dict(),
+            "config": {**base_config, "d_m": dm_rand, "use_pe": True},
+            "vocab": utils.UNIFIED_VOCAB,
+            "history": [(0, 10.0), (base_config["iters"], 10.0)] # Placeholder
+        }, "models/random_init.pt")
+        best_curves["random_init"] = [(0, 10.0), (50000, 10.0)]
 
-    # Create a "curve" of constant random loss
-    best_curves["random_init"] = [(0, rand_loss), (base_config["iters"], rand_loss)]
-    torch.save({
-        "model_state_dict": rand_model.state_dict(),
-        "config": {**base_config, "d_m": dm_rand, "use_pe": True},
-        "vocab": utils.UNIFIED_VOCAB
-    }, "models/random_init.pt")
-    del rand_model
-    gc.collect()
-    if torch.cuda.is_available():
-        torch.cuda.empty_cache()
+    # Grid search
+    for use_pe in [True, False]:
+        curve_id = "with_pe" if use_pe else "no_pe"
+        best_file = f"models/{curve_id}_best.pt"
 
-    # Train no position-encodings models
-    print("\n--- Starting No-PE Grid Search ---")
-    best_no_pe_loss = float("inf")
-    best_no_pe_state = None
-    best_no_pe_config = None
-    best_no_pe_vocab = None
+        print(f"\n--- Starting {curve_id} Grid Search ---")
+        best_loss = float("inf")
+        best_data = None
 
-    for lr, bs in product(lrs, batch_sizes):
-        config = {**base_config, "lr": lr, "batch_size": bs, "use_pe": False}
-        last_loss, history, state, cfg, vocab = train_on_file(file_path,
-                                                              config,
-                                                              all_tokens, "no_pe")
-        if last_loss < best_no_pe_loss:
-            best_no_pe_loss = last_loss
-            best_curves["no_pe_best"] = history
-            best_no_pe_state = state
-            best_no_pe_config = cfg
-            best_no_pe_vocab = vocab
+        for lr, bs in product(lrs, batch_sizes):
+            config = {**base_config, "lr": lr, "batch_size": bs,
+                      "use_pe": use_pe}
+            res = train_on_file(config, all_tokens, curve_id)
+            last_loss, history, state, cfg, vocab = res
 
-    torch.save({"model_state_dict": best_no_pe_state,
-                "config": best_no_pe_config, "vocab": best_no_pe_vocab},
-                "models/no_pe_best.pt")
+            if last_loss < best_loss:
+                best_loss = last_loss
+                best_data = {"model_state_dict": state, "config": cfg,
+                             "vocab": vocab, "history": history}
 
-    # Train full (has positional encodings) models
-    print("\n--- Starting With-PE Grid Search ---")
-    best_with_pe_loss = float("inf")
-    best_with_pe_state = None
-    best_with_pe_config = None
-    best_with_pe_vocab = None
+        if best_data:
+            torch.save(best_data, best_file)
+            best_curves[f"{curve_id}_best"] = best_data["history"]
 
-    for lr, bs in product(lrs, batch_sizes):
-        config = {**base_config, "lr": lr, "batch_size": bs, "use_pe": True}
-        last_loss, history, state, cfg, vocab = train_on_file(file_path, config,
-                                                              all_tokens,
-                                                              "with_pe")
-        if last_loss < best_with_pe_loss:
-            best_with_pe_loss = last_loss
-            best_curves["with_pe_best"] = history
-            best_with_pe_state = state
-            best_with_pe_config = cfg
-            best_with_pe_vocab = vocab
-
-    torch.save({"model_state_dict": best_with_pe_state,
-                "config": best_with_pe_config, "vocab": best_with_pe_vocab},
-                "models/with_pe_best.pt")
-
-    # Save final comparison plot
     save_plot(best_curves, "Star Wars GPT Model Comparison",
               "training_comparison.png")
-    print("\n>>> ALL TRAINING COMPLETE. Comparison plot saved to "
-          "training_comparison.png.")
+    print("\n>>> ALL TRAINING COMPLETE.")

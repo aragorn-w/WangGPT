@@ -1,17 +1,17 @@
 import glob
 import os
 import re
+from typing import Any, Optional
 
 import torch
-import torch.nn as nn
 
-from utils import clean_tokenization,\
+from utils import clean_tokenization, translate_state_dict,\
     UNIFIED_VOCAB, TOK_TO_IDX, VOCAB_SIZE
-from wang_gpt import WangGPT
+from wang_gpt import WangGPT, Config
 
 
-def evaluate_model(model: torch.nn.Module, data: torch.tensor,
-                   win_size: int, batch_size: int, device: str):
+def evaluate_model(model: WangGPT, data: torch.Tensor,
+                   win_size: int, batch_size: int, device: str) -> float:
     """Evaluates a model's performance on a validation dataset.
 
     Calculates the average cross-entropy loss over a subset of the
@@ -27,32 +27,33 @@ def evaluate_model(model: torch.nn.Module, data: torch.tensor,
     Returns:
     - Float representing the average loss.
     """
-
     model.eval()
-    loss_func = nn.CrossEntropyLoss()
-    total_loss = 0
-    num_batches = 0
+    total_loss: float = 0
+    num_batches: int = 0
 
     with torch.no_grad():
-        max_idx = len(data) - win_size - 1
+        max_idx: int = len(data) - win_size - 1
         if max_idx <= 0: return float("inf")
 
-        steps = min(50, max_idx // batch_size + 1) if max_idx > batch_size else 1
+        steps: int = min(50, max_idx // batch_size + 1) \
+            if max_idx > batch_size else 1
         for i in range(steps):
-            start_pos = (i * batch_size) % max_idx
-            indices = [(start_pos + j) % max_idx for j in range(batch_size)]
-            x = torch.stack([data[idx: idx + win_size] for idx in indices]).to(device)
-            y = torch.stack([data[idx + 1: idx + 1 + win_size] for idx in indices]).to(device)
+            start_pos: int = (i * batch_size) % max_idx
+            indices: list[int] = [(start_pos + j) % max_idx
+                                  for j in range(batch_size)]
+            x: torch.Tensor = torch.stack([data[idx: idx + win_size]
+                                           for idx in indices]).to(device)
+            y: torch.Tensor = torch.stack([data[idx + 1: idx + 1 + win_size]
+                                           for idx in indices]).to(device)
 
-            logits = model(x)
-            loss = loss_func(logits.view(-1, logits.size(-1)), y.view(-1))
+            _, loss = model(x, targets=y)
             total_loss += loss.item()
             num_batches += 1
 
     return total_loss / num_batches if num_batches > 0 else float("inf")
 
 
-def parse_filename(filename: str):
+def parse_filename(filename: str) -> dict[str, Any]:
     """Extracts model hyperparameters from a standard result filename.
 
     Args:
@@ -61,109 +62,110 @@ def parse_filename(filename: str):
     Returns:
     - Dictionary containing d_m, lr, batch_size, layers, and window_size.
     """
+    dm_match: Optional[re.Match] = re.search(r"-dm(\d+)", filename)
+    dm: int = int(dm_match.group(1)) if dm_match else 120
 
-    # Example: eps1_3-lr0.0003-bs32-dm236.pt
-    dm_match = re.search(r"-dm(\d+)", filename)
-    dm = int(dm_match.group(1)) if dm_match else 252
+    lr_match: Optional[re.Match] = re.search(r"-lr([\d\.]+)", filename)
+    lr: float = float(lr_match.group(1)) if lr_match else 0.0003
 
-    lr_match = re.search(r"-lr([\d\.]+)", filename)
-    lr = float(lr_match.group(1)) if lr_match else 0.0003
+    bs_match: Optional[re.Match] = re.search(r"-bs(\d+)", filename)
+    bs: int = int(bs_match.group(1)) if bs_match else 32
 
-    bs_match = re.search(r"-bs(\d+)", filename)
-    bs = int(bs_match.group(1)) if bs_match else 32
-
-    return {"d_m": dm, "lr": lr, "batch_size": bs, "layers": 7, "window_size": 128}
+    return {"d_m": dm, "lr": lr, "batch_size": bs, "layers": 7,
+            "window_size": 128}
 
 
-def consolidate():
-    """Finds the best-performing model for each episode and saves it as a final holocron.
+def consolidate() -> None:
+    """Finds the best-performing model for each episode and saves it
+    as a final holocron.
 
     Iterates through all models in the models/ directory, evaluates them on
     validation data, saves the best one with its metadata, and removes the rest.
     """
-
-    model_files = glob.glob("models/*.pt")
+    model_files: list[str] = glob.glob("models/*.pt")
     # Exclude already consolidated best models and the unified vocab
-    model_files = [f for f in model_files if not f.endswith("_best.pt") and f != "models/unified_vocab.pt"]
+    model_files = [f for f in model_files if not f.endswith("_best.pt")
+                   and f != "models/unified_vocab.pt"]
 
     if not model_files:
         print("No new models found to consolidate.")
         return
 
-    groups = {}
+    groups: dict[str, list[str]] = {}
     for f in model_files:
-        base = os.path.basename(f).split("-")[0]
+        base: str = os.path.basename(f).split("-")[0]
         if base not in groups:
             groups[base] = []
         groups[base].append(f)
 
-    device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+    device: torch.device = torch.device("cuda" if torch.cuda.is_available()
+                                        else "cpu")
     print(f"Using device: {device}")
 
     for episode, files in groups.items():
         print(f"\n--- Consolidating {episode} ({len(files)} models) ---")
 
         # Try to find the data file. Fall back to combined_star_wars.txt
-        data_path = f"data/{episode}.txt"
+        data_path: str = f"data/{episode}.txt"
         if not os.path.exists(data_path):
             data_path = "data/combined_star_wars.txt"
-            print(f"Data file {episode}.txt not found. Falling back to {data_path}")
+            print(f"Data file {episode}.txt not found. "
+                  "Falling back to {data_path}")
 
         if not os.path.exists(data_path):
             print(f"No data source found for {episode}. Skipping.")
             continue
 
         with open(data_path, "r", encoding="utf-8") as f:
-            text = f.read()
-        all_tokens = clean_tokenization(text)
+            text: str = f.read()
+        all_tokens: list[str] = clean_tokenization(text)
 
-        split_idx = int(len(all_tokens) * 0.8)
-        val_tokens = all_tokens[split_idx:]
-        val_data = torch.tensor([TOK_TO_IDX[w] for w in val_tokens
+        split_idx: int = int(len(all_tokens) * 0.8)
+        val_tokens: list[str] = all_tokens[split_idx:]
+        val_data: torch.Tensor = torch.tensor([TOK_TO_IDX[w] for w in val_tokens
                                  if w in TOK_TO_IDX], dtype=torch.long)
 
-        best_loss = float("inf")
-        best_model_path = None
+        best_loss: float = float("inf")
+        best_model_path: Optional[str] = None
 
         for model_path in files:
             print(f"Evaluating {model_path}...", end=" ", flush=True)
             try:
-                checkpoint = torch.load(model_path, map_location=device)
+                checkpoint: Any = torch.load(model_path, map_location=device)
 
-                if isinstance(checkpoint, dict) and "model_state_dict" in checkpoint:
-                    config = checkpoint["config"]
-                    state_dict = checkpoint["model_state_dict"]
+                if isinstance(checkpoint, dict) and "model_state_dict" \
+                in checkpoint:
+                    config_dict: dict[str, Any] = checkpoint["config"]
+                    state_dict: dict[str, torch.Tensor] = \
+                        checkpoint["model_state_dict"]
                 else:
-                    config = parse_filename(os.path.basename(model_path))
-                    state_dict = checkpoint
+                    config_dict = parse_filename(os.path.basename(model_path))
+                    state_dict = translate_state_dict(checkpoint,
+                                                      config_dict["d_m"])
 
-                model = WangGPT(
-                    d_v=VOCAB_SIZE,
-                    d_m=config["d_m"],
-                    num_tbs=config["layers"],
-                    w=config["window_size"],
-                    b=config["batch_size"],
-                    use_pe=config.get("use_pe", True)
+                config: Config = Config(
+                    d_vocab=VOCAB_SIZE,
+                    d_model=config_dict["d_m"],
+                    n_layers=config_dict["layers"],
+                    n_heads=4,
+                    window_size=config_dict["window_size"]
                 )
-
-                # Check if vocab size matches
-                if state_dict["U"].shape[1] != VOCAB_SIZE:
-                    print(f"Vocab mismatch! Expected {state_dict['U'].shape[1]}"
-                          f", got {VOCAB_SIZE}. Skipping.")
-                    continue
+                model: WangGPT = WangGPT(config)
 
                 # Handle DataParallel prefix if present
-                new_state_dict = {}
+                new_state_dict: dict[str, torch.Tensor] = {}
                 for k, v in state_dict.items():
                     if k.startswith("module."):
                         new_state_dict[k[7:]] = v
                     else:
                         new_state_dict[k] = v
 
-                model.load_state_dict(new_state_dict)
+                model.load_state_dict(new_state_dict, strict=False)
                 model.to(device)
 
-                loss = evaluate_model(model, val_data, config["window_size"], config["batch_size"], device)
+                loss: float = evaluate_model(model, val_data,
+                                             config.window_size,
+                                             config_dict["batch_size"], device)
                 print(f"Loss: {loss:.4f}")
 
                 if loss < best_loss:
@@ -173,17 +175,23 @@ def consolidate():
                 print(f"Error: {e}")
 
         if best_model_path:
-            final_name = f"models/{episode}_best.pt"
-            print(f"Best model for {episode} is {best_model_path} with loss {best_loss:.4f}")
+            final_name: str = f"models/{episode}_best.pt"
+            print(f"Best model for {episode} is {best_model_path} "
+                  "with loss {best_loss:.4f}")
             # Keep the best one, delete others
-            best_ckpt = torch.load(best_model_path, map_location="cpu")
-            if not (isinstance(best_ckpt, dict) and "model_state_dict" in best_ckpt):
+            best_ckpt: Any = torch.load(best_model_path, map_location="cpu")
+            if not (isinstance(best_ckpt, dict) and "model_state_dict"
+            in best_ckpt):
+                config_dict = parse_filename(os.path.basename(best_model_path))
                 # Upgrade it to a full checkpoint
                 best_ckpt = {
-                    "model_state_dict": best_ckpt,
-                    "config": parse_filename(os.path.basename(best_model_path)),
+                    "model_state_dict": translate_state_dict(
+                        best_ckpt,
+                        config_dict["d_m"]),
+                    "config": config_dict,
                     "vocab": UNIFIED_VOCAB,
-                    "run_name": os.path.basename(best_model_path).replace(".pt", "")
+                    "run_name": os.path.basename(
+                        best_model_path).replace(".pt", "")
                 }
             torch.save(best_ckpt, final_name)
             print(f"Saved as {final_name}")
