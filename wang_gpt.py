@@ -20,6 +20,7 @@ class Config:
     - dropout: Dropout probability.
     - tie_embeddings: Whether to tie token and unembedding weights.
     """
+
     d_vocab: int
     d_model: int
     n_layers: int
@@ -42,6 +43,7 @@ class RMSNorm(nn.Module):
     - d_model: Dimension of the input features.
     - eps: Small constant for numerical stability.
     """
+
     def __init__(self, d_model: int, eps: float = 1e-6):
         super().__init__()
         self.eps: float = eps
@@ -67,6 +69,7 @@ class MultiHeadAttention(nn.Module):
     Args:
     - config: Configuration object.
     """
+
     def __init__(self, config: Config):
         super().__init__()
         assert config.d_model % config.n_heads == 0
@@ -74,20 +77,18 @@ class MultiHeadAttention(nn.Module):
         self.d_head: int = config.d_model // config.n_heads
 
         # Split projections (Extra Credit: "efficient split version")
-        self.q_proj: nn.Linear = nn.Linear(config.d_model, config.d_model,
-                                           bias=False)
-        self.k_proj: nn.Linear = nn.Linear(config.d_model, config.d_model,
-                                           bias=False)
-        self.v_proj: nn.Linear = nn.Linear(config.d_model, config.d_model,
-                                           bias=False)
-        self.o_proj: nn.Linear = nn.Linear(config.d_model, config.d_model,
-                                           bias=False)
+        self.q_proj: nn.Linear = nn.Linear(config.d_model, config.d_model, bias=False)
+        self.k_proj: nn.Linear = nn.Linear(config.d_model, config.d_model, bias=False)
+        self.v_proj: nn.Linear = nn.Linear(config.d_model, config.d_model, bias=False)
+        self.o_proj: nn.Linear = nn.Linear(config.d_model, config.d_model, bias=False)
 
         self.dropout: nn.Dropout = nn.Dropout(config.dropout)
-        self.register_buffer("mask", torch.tril(torch.ones(config.window_size,
-                                                           config.window_size))
-                             .view(1, 1, config.window_size,
-                                   config.window_size))
+        self.register_buffer(
+            "mask",
+            torch.tril(torch.ones(config.window_size, config.window_size)).view(
+                1, 1, config.window_size, config.window_size
+            ),
+        )
 
     def forward(self, x: torch.Tensor) -> torch.Tensor:
         """Computes multi-head attention.
@@ -100,16 +101,18 @@ class MultiHeadAttention(nn.Module):
         """
         B, T, C = x.size()
 
-        q: torch.Tensor = self.q_proj(x).view(B, T, self.n_heads, self.d_head)\
-            .transpose(1, 2)
-        k: torch.Tensor = self.k_proj(x).view(B, T, self.n_heads, self.d_head)\
-            .transpose(1, 2)
-        v: torch.Tensor = self.v_proj(x).view(B, T, self.n_heads, self.d_head)\
-            .transpose(1, 2)
+        q: torch.Tensor = (
+            self.q_proj(x).view(B, T, self.n_heads, self.d_head).transpose(1, 2)
+        )
+        k: torch.Tensor = (
+            self.k_proj(x).view(B, T, self.n_heads, self.d_head).transpose(1, 2)
+        )
+        v: torch.Tensor = (
+            self.v_proj(x).view(B, T, self.n_heads, self.d_head).transpose(1, 2)
+        )
 
-        att: torch.Tensor = (q @ k.transpose(-2, -1)) * \
-            (1.0 / (self.d_head ** 0.5))
-        att = att.masked_fill(self.mask[:,:,:T,:T] == 0, float("-inf"))
+        att: torch.Tensor = (q @ k.transpose(-2, -1)) * (1.0 / (self.d_head**0.5))
+        att = att.masked_fill(self.mask[:, :, :T, :T] == 0, float("-inf"))
         att = F.softmax(att, dim=-1)
         att = self.dropout(att)
 
@@ -124,12 +127,11 @@ class MLP(nn.Module):
     Args:
     - config: Configuration object.
     """
+
     def __init__(self, config: Config):
         super().__init__()
-        self.fc1: nn.Linear = nn.Linear(config.d_model, config.d_mlp,
-                                        bias=False)
-        self.fc2: nn.Linear = nn.Linear(config.d_mlp, config.d_model,
-                                        bias=False)
+        self.fc1: nn.Linear = nn.Linear(config.d_model, config.d_mlp, bias=False)
+        self.fc2: nn.Linear = nn.Linear(config.d_mlp, config.d_model, bias=False)
         self.dropout: nn.Dropout = nn.Dropout(config.dropout)
         self.act: nn.ReLU = nn.ReLU()
 
@@ -154,6 +156,7 @@ class Block(nn.Module):
     Args:
     - config: Configuration object.
     """
+
     def __init__(self, config: Config):
         super().__init__()
         self.norm1: RMSNorm = RMSNorm(config.d_model)
@@ -181,21 +184,22 @@ class WangGPT(nn.Module):
     Args:
     - config: Configuration object.
     """
+
     def __init__(self, config: Config):
         super().__init__()
         self.config: Config = config
 
-        self.token_emb: nn.Embedding = nn.Embedding(config.d_vocab,
-                                                    config.d_model)
+        self.token_emb: nn.Embedding = nn.Embedding(config.d_vocab, config.d_model)
         self.pos_emb: nn.Parameter = nn.Parameter(
-            torch.zeros(1, config.window_size, config.d_model))
+            torch.randn(1, config.window_size, config.d_model) * 0.02
+        )
         self.dropout: nn.Dropout = nn.Dropout(config.dropout)
 
-        self.blocks: nn.ModuleList = nn.ModuleList([Block(config) for _
-                                                    in range(config.n_layers)])
+        self.blocks: nn.ModuleList = nn.ModuleList(
+            [Block(config) for _ in range(config.n_layers)]
+        )
         self.norm_f: RMSNorm = RMSNorm(config.d_model)
-        self.lm_head: nn.Linear = nn.Linear(config.d_model, config.d_vocab,
-                                            bias=False)
+        self.lm_head: nn.Linear = nn.Linear(config.d_model, config.d_vocab, bias=False)
 
         if config.tie_embeddings:
             self.lm_head.weight = self.token_emb.weight
@@ -215,9 +219,9 @@ class WangGPT(nn.Module):
         elif isinstance(module, nn.Embedding):
             torch.nn.init.normal_(module.weight, mean=0.0, std=0.02)
 
-    def forward(self, idx: torch.Tensor,
-                targets: Optional[torch.Tensor] = None) -> \
-    tuple[torch.Tensor, Optional[torch.Tensor]]:
+    def forward(
+        self, idx: torch.Tensor, targets: Optional[torch.Tensor] = None
+    ) -> tuple[torch.Tensor, Optional[torch.Tensor]]:
         """Performs the forward pass of the model.
 
         Args:
@@ -232,7 +236,7 @@ class WangGPT(nn.Module):
         token_embeddings: torch.Tensor = self.token_emb(idx)
         x: torch.Tensor = token_embeddings
         if self.config.use_pos_emb:
-            position_embeddings: torch.Tensor = self.pos_emb[:, :idx.size(1), :]
+            position_embeddings: torch.Tensor = self.pos_emb[:, : idx.size(1), :]
             x = x + position_embeddings
         x = self.dropout(x)
 
@@ -244,15 +248,19 @@ class WangGPT(nn.Module):
 
         loss: Optional[torch.Tensor] = None
         if targets is not None:
-            loss = F.cross_entropy(logits.view(-1, logits.size(-1)),
-                                   targets.view(-1))
+            loss = F.cross_entropy(logits.view(-1, logits.size(-1)), targets.view(-1))
 
         return logits, loss
 
     @torch.no_grad()
-    def generate(self, idx: torch.Tensor, max_new_tokens: int,
-                 temperature: float = 1.0, top_k: Optional[int] = None,
-                 top_p: Optional[float] = None) -> torch.Tensor:
+    def generate(
+        self,
+        idx: torch.Tensor,
+        max_new_tokens: int,
+        temperature: float = 1.0,
+        top_k: Optional[int] = None,
+        top_p: Optional[float] = None,
+    ) -> torch.Tensor:
         """Generates text autoregressively with varied sampling methods.
 
         Supports Temperature, Top-K, and Top-P (Nucleus) sampling.
@@ -270,8 +278,11 @@ class WangGPT(nn.Module):
         self.eval()
         for _ in range(max_new_tokens):
             # Crop index if it exceeds window size
-            idx_cond = idx if idx.size(1) <= self.config.window_size \
-            else idx[:, -self.config.window_size:]
+            idx_cond = (
+                idx
+                if idx.size(1) <= self.config.window_size
+                else idx[:, -self.config.window_size :]
+            )
 
             logits, _ = self(idx_cond)
             # Focus only on the last time step
@@ -284,22 +295,22 @@ class WangGPT(nn.Module):
 
             # Optional: Top-P (Nucleus) sampling
             if top_p is not None:
-                sorted_logits, sorted_indices = torch.sort(logits,
-                                                           descending=True)
-                cumulative_probs = torch.cumsum(F.softmax(sorted_logits,
-                                                          dim=-1), dim=-1)
+                sorted_logits, sorted_indices = torch.sort(logits, descending=True)
+                cumulative_probs = torch.cumsum(
+                    F.softmax(sorted_logits, dim=-1), dim=-1
+                )
 
                 # Remove tokens with cumulative probability above the threshold
                 sorted_indices_to_remove = cumulative_probs > top_p
                 # Shift the indices to the right to keep the first token
                 # above the threshold
-                sorted_indices_to_remove[..., 1:] = \
-                    sorted_indices_to_remove[..., :-1].clone()
+                sorted_indices_to_remove[..., 1:] = sorted_indices_to_remove[
+                    ..., :-1
+                ].clone()
                 sorted_indices_to_remove[..., 0] = 0
 
                 for b in range(logits.size(0)):
-                    indices_to_remove = \
-                        sorted_indices[b, sorted_indices_to_remove[b]]
+                    indices_to_remove = sorted_indices[b, sorted_indices_to_remove[b]]
                     logits[b, indices_to_remove] = -float("inf")
 
             probs = F.softmax(logits, dim=-1)

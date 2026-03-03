@@ -14,7 +14,7 @@ try:
     TOK_TO_IDX = {tok: idx for idx, tok in enumerate(UNIFIED_VOCAB)}
     IDX_TO_TOK = {idx: tok for tok, idx in TOK_TO_IDX.items()}
     VOCAB_SIZE = len(UNIFIED_VOCAB)
-except:
+except Exception as _:
     UNIFIED_VOCAB = None
     TOK_TO_IDX = None
     IDX_TO_TOK = None
@@ -50,16 +50,16 @@ def clean_tokenization(text: str) -> list[str]:
         raise ValueError("Input text must be a string.")
 
     doc = NLP_MODEL(text.lower())
-    tokens = [
-        token.text for token in doc
-        if not token.is_stop and not token.is_punct and token.is_alpha
-    ]
+    tokens = [token.text for token in doc if not token.is_space and token.is_alpha]
 
     # Save to cache
     torch.save(tokens, cache_path)
     return tokens
 
-def translate_state_dict(old_sd: dict[str, torch.Tensor], d_m: int) -> dict[str, torch.Tensor]:
+
+def translate_state_dict(
+    old_sd: dict[str, torch.Tensor], d_m: int
+) -> dict[str, torch.Tensor]:
     """Maps legacy model weight keys to the new architecture's keys.
 
     Args:
@@ -73,7 +73,7 @@ def translate_state_dict(old_sd: dict[str, torch.Tensor], d_m: int) -> dict[str,
     for k, v in old_sd.items():
         if k == "E.lookup":
             new_sd["token_emb.weight"] = v
-            new_sd["lm_head.weight"] = v # Tied
+            new_sd["lm_head.weight"] = v  # Tied
         elif k == "PE":
             new_sd["pos_emb"] = v.unsqueeze(0)
         elif "TBs." in k:
