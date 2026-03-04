@@ -12,6 +12,11 @@ Star Wars novelization data files are [hosted here on my Google Drive](https://d
 
 **Reproduction**: Simply move the `data.zip` file into the project root. The training script will automatically unzip and process it for you.
 
+### 0.1 **Weights & Biases (Optional)**: If you do not wish to log to a cloud account, disable W&B before training:
+```bash
+export WANDB_MODE=disabled
+```
+
 ### 1. Install Dependencies
 ```bash
 uv sync
@@ -28,22 +33,6 @@ Load a trained model and chat with it:
 ```bash
 uv run chat.py
 ```
-
----
-
-## Reproduction
-
-To reproduce these results from scratch on any machine:
-1. Ensure `uv` is installed (`curl -LsSf https://astral.sh/uv/install.sh | sh`).
-2. Place the `data.zip` file in the project root.
-3. **Weights & Biases (Optional)**: If you do not wish to log to a cloud account, disable W&B before training:
-   ```bash
-   export WANDB_MODE=disabled
-   ```
-4. Run the automated pipeline (this unzips the data, builds vocab, and trains all 3 models):
-   ```bash
-   uv run train_model.py
-   ```
 
 ---
 
