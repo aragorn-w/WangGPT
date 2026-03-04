@@ -103,6 +103,7 @@ def train_on_file(
 
     dm = get_optimal_dm(vocab_size, config_dict["layers"], config_dict["window_size"])
     config_dict["d_m"] = dm
+    os.makedirs("models", exist_ok=True)
     run_name = f"{curve_id}-lr{config_dict['lr']}-bs{config_dict['batch_size']}-dm{dm}"
     checkpoint_path = f"models/{run_name}.pt"
 

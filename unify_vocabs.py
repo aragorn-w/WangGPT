@@ -74,6 +74,7 @@ def main() -> None:
     tokens: list[str] = clean_tokenization(text)
     vocab: list[str] = sorted(list(set(tokens)))
 
+    os.makedirs("models", exist_ok=True)
     torch.save(vocab, "models/unified_vocab.pt")
     print(f"Unified vocabulary saved! Size: {len(vocab)} words.")
 
